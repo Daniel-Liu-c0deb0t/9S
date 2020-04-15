@@ -1,18 +1,23 @@
 use std::env;
 use std::net;
+use std::time;
+use std::net::ToSocketAddrs;
 use std::str::*;
 
 use pnet::packet::*;
 use pnet::transport::*;
 
-const PAYLOAD_SIZE: usize = 56;
-const DELAY_MILLIS: u64 = 500;
+const DEFAULT_TTL: u8 = 64;
+const DEFAULT_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_PAYLOAD_SIZE: usize = 56;
+const DEFAULT_DELAY_MS: u64 = 1000;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let mut ttl = u8::max_value();
+    let mut ttl = DEFAULT_TTL;
     let mut addr = &"".to_string();
+    let mut timeout_ms = DEFAULT_TIMEOUT_MS;
 
     let mut i = 1;
     let mut pos_args = 0;
@@ -23,6 +28,10 @@ fn main() {
             "--ttl" => {
                 i += 1;
                 ttl = args[i].parse::<u8>().expect(format!("{} is not a valid TTL number! 9S unhappy :(", args[i]).as_str());
+            },
+            "--timeout" => {
+                i += 1;
+                timeout_ms = args[i].parse::<u64>().expect(format!("{} is not a valid timeout value! 9S unhappy :(", args[i]).as_str());
             },
             _ => {
                 if pos_args > pos_args_max {
@@ -41,10 +50,33 @@ fn main() {
         panic!("You are missing an argument! 9S unhappy :(");
     }
 
-    let ip_addr = net::IpAddr::from_str(addr)
-        .expect(format!("{} is not a valid IPv4/IPv6 address or hostname! 9S unhappy!", addr).as_str());
+    ping(addr, ttl, timeout_ms);
+}
 
-    println!("Pinging {} ({}) with 9S's special abilities.", addr, ip_addr);
+pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
+    let timeout = time::Duration::from_millis(timeout_ms);
+
+    let ip_addr = match net::IpAddr::from_str(addr) {
+        Ok(ip) => {
+            println!("Pinging {} with 9S's special abilities.", ip);
+            ip
+        },
+        Err(_) => {
+            // must be a hostname or an invalid IPv4/IPv6 address
+            // workaround to do DNS lookup using SocketAddr; port number does not matter
+            let ip = (addr.as_str(), 80u16).to_socket_addrs()
+                .expect(format!("{} is not a valid IPv4/IPv6 address or hostname! 9S unhappy!", addr).as_str())
+                .next()
+                .unwrap()
+                .ip();
+            println!("Pinging {} ({}) with 9S's special abilities.", addr, ip);
+            ip
+        }
+    };
+
+    let mut total_packets = 0u32;
+    let mut lost_packets = 0u32;
+    let mut total_rtt = 0u128;
 
     match ip_addr {
         net::IpAddr::V4(_) => {
@@ -56,21 +88,54 @@ fn main() {
             let mut receiver_iter = icmp_packet_iter(&mut receiver);
 
             loop {
-                let mut icmp_buffer = [0u8; 8 + PAYLOAD_SIZE];
+                let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
                 let packet = make_icmp_packet(&mut icmp_buffer);
                 sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy!");
+                total_packets += 1;
+                let curr_time = time::Instant::now();
 
                 loop {
-                    let res_packet = receiver_iter.next().expect("Error in receiving next packet! 9S unhappy!");
+                    let res = receiver_iter.next_with_timeout(timeout)
+                        .expect("Error in receiving next packet! 9S unhappy!");
+                    let res_tuple = match res {
+                        Some(p) => p,
+                        None => {
+                            lost_packets += 1;
+                            println!("9S did not received packet from {} in {} ms (timeout); sent {}, with {} ({:.1}%) lost/timeout so far.",
+                            addr, timeout_ms, total_packets, lost_packets, lost_packets as f32 / total_packets as f32 * 100.0f32);
 
-                    if res_packet.0.get_icmp_type() == icmp::IcmpTypes::EchoReply {
-                        println!("{:?}", res_packet);
+                            break;
+                        }
+                    };
 
-                        break;
+                    match res_tuple.0.get_icmp_type() {
+                        icmp::IcmpTypes::EchoReply => {
+                            let elapsed_ms = curr_time.elapsed().as_millis();
+                            total_rtt += elapsed_ms;
+                            println!("9S received packet from {} in {} ms (avg rtt: {:.1} ms); sent {}, with {} ({:.1}%) lost/timeout so far.",
+                            addr, elapsed_ms, total_rtt as f64 / (total_packets - lost_packets) as f64, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
+
+                            break;
+                        },
+                        icmp::IcmpTypes::DestinationUnreachable => {
+                            lost_packets += 1;
+                            println!("{} is unreachable by 9S (code {})! Sent {}, with {} ({:.1}%) lost/timeout so far.",
+                            addr, res_tuple.0.get_icmp_code().0, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
+
+                            break;
+                        },
+                        icmp::IcmpTypes::TimeExceeded => {
+                            lost_packets += 1;
+                            println!("9S found out that the packet (ttl: {}) expired before reaching {} (last host: {})! Sent {}, with {} ({:.1}%) lost/timeout so far.",
+                            ttl, addr, res_tuple.1, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
+
+                            break;
+                        },
+                        _ => () // keep waiting for the correct packet to come back
                     }
                 }
 
-                std::thread::sleep(std::time::Duration::from_millis(DELAY_MILLIS));
+                std::thread::sleep(time::Duration::from_millis(DEFAULT_DELAY_MS));
             }
         },
         net::IpAddr::V6(ip) => {
@@ -82,19 +147,23 @@ fn main() {
             let mut receiver_iter = icmpv6_packet_iter(&mut receiver);
 
             loop {
-                let mut icmp_buffer = [0u8; 8 + PAYLOAD_SIZE];
+                let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
                 let packet = make_icmpv6_packet(ip, &mut icmp_buffer);
                 sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy!");
 
                 loop {
-                    let res_packet = receiver_iter.next().expect("Error in receiving next packet! 9S unhappy!");
+                    let res_packet = receiver_iter.next_with_timeout(timeout)
+                        .expect("Error in receiving next packet! 9S unhappy!").unwrap();
 
+                    // we only care about echo replies
                     if res_packet.0.get_icmpv6_type() == icmpv6::Icmpv6Types::EchoReply {
                         println!("{:?}", res_packet);
 
                         break;
                     }
                 }
+
+                std::thread::sleep(time::Duration::from_millis(DEFAULT_DELAY_MS));
             }
         }
     }
@@ -117,7 +186,7 @@ fn make_icmpv6_packet(dest: net::Ipv6Addr, icmp_buffer: &mut [u8]) -> icmpv6::Ic
     let mut icmp_packet = icmpv6::MutableIcmpv6Packet::new(icmp_buffer).unwrap();
     icmp_packet.populate(&icmpv6::Icmpv6{
         icmpv6_type: icmpv6::Icmpv6Types::EchoRequest,
-        icmpv6_code: icmpv6::ndp::Icmpv6Codes::NoCode,
+        icmpv6_code: icmpv6::Icmpv6Code::new(0),
         checksum: 0,
         payload: vec![]
     });
