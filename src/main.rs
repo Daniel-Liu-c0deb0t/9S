@@ -77,22 +77,26 @@ pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
     let mut total_packets = 0u32;
     let mut lost_packets = 0u32;
     let mut total_rtt = 0u128;
+    let identifier = std::process::id() as u16;
+    let mut seq_num = 0u16;
 
     match ip_addr {
         net::IpAddr::V4(_) => {
             // note: must use Layer4 since pnet does not support IPv6 Layer3
-            let (mut sender, mut receiver) = transport_channel(100, TransportChannelType::Layer4(
+            let (mut sender, mut receiver) = transport_channel(1024, TransportChannelType::Layer4(
                     TransportProtocol::Ipv4(ip::IpNextHeaderProtocols::Icmp)))
                 .expect("Unable to open transport channel! 9S unhappy!");
             sender.set_ttl(ttl).unwrap();
             let mut receiver_iter = icmp_packet_iter(&mut receiver);
 
             loop {
-                let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
-                let packet = make_icmp_packet(&mut icmp_buffer);
-                sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy!");
                 total_packets += 1;
+                seq_num += 1;
+                let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
+                let packet = make_icmp_packet(&mut icmp_buffer, identifier, seq_num);
                 let curr_time = time::Instant::now();
+
+                sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy!");
 
                 loop {
                     let res = receiver_iter.next_with_timeout(timeout)
@@ -110,12 +114,16 @@ pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
 
                     match res_tuple.0.get_icmp_type() {
                         icmp::IcmpTypes::EchoReply => {
-                            let elapsed_ms = curr_time.elapsed().as_millis();
-                            total_rtt += elapsed_ms;
-                            println!("9S received packet from {} in {} ms (avg rtt: {:.1} ms); sent {}, with {} ({:.1}%) lost/timeout so far.",
-                            addr, elapsed_ms, total_rtt as f64 / (total_packets - lost_packets) as f64, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
+                            let (res_identifier, res_seq_num) = read_payload(res_tuple.0.payload());
 
-                            break;
+                            if res_identifier == identifier && res_seq_num == seq_num {
+                                let elapsed_ms = curr_time.elapsed().as_millis();
+                                total_rtt += elapsed_ms;
+                                println!("9S received packet from {} in {} ms (avg rtt: {:.1} ms); sent {}, with {} ({:.1}%) lost/timeout so far.",
+                                addr, elapsed_ms, total_rtt as f64 / (total_packets - lost_packets) as f64, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
+
+                                break;
+                            }
                         },
                         icmp::IcmpTypes::DestinationUnreachable => {
                             lost_packets += 1;
@@ -140,7 +148,7 @@ pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
         },
         net::IpAddr::V6(ip) => {
             // note: must use Layer4 since pnet does not support IPv6 Layer3
-            let (mut sender, mut receiver) = transport_channel(100, TransportChannelType::Layer4(
+            let (mut sender, mut receiver) = transport_channel(1024, TransportChannelType::Layer4(
                     TransportProtocol::Ipv6(ip::IpNextHeaderProtocols::Icmpv6)))
                 .expect("Unable to open transport channel! 9S unhappy!");
             sender.set_ttl(ttl).unwrap();
@@ -148,7 +156,7 @@ pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
 
             loop {
                 let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
-                let packet = make_icmpv6_packet(ip, &mut icmp_buffer);
+                let packet = make_icmpv6_packet(ip, &mut icmp_buffer, identifier, seq_num);
                 sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy!");
 
                 loop {
@@ -169,30 +177,44 @@ pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
     }
 }
 
-fn make_icmp_packet(icmp_buffer: &mut [u8]) -> icmp::IcmpPacket {
+fn make_icmp_packet(icmp_buffer: &mut [u8], identifier: u16, seq_num: u16) -> icmp::IcmpPacket {
     let mut icmp_packet = icmp::MutableIcmpPacket::new(icmp_buffer).unwrap();
     icmp_packet.populate(&icmp::Icmp{
         icmp_type: icmp::IcmpTypes::EchoRequest,
         icmp_code: icmp::IcmpCode::new(0),
         checksum: 0,
-        payload: vec![]
+        payload: make_payload(identifier, seq_num)
     });
 
     icmp_packet.set_checksum(icmp::checksum(&icmp_packet.to_immutable()));
     icmp_packet.consume_to_immutable()
 }
 
-fn make_icmpv6_packet(dest: net::Ipv6Addr, icmp_buffer: &mut [u8]) -> icmpv6::Icmpv6Packet {
+fn make_icmpv6_packet(dest: net::Ipv6Addr, icmp_buffer: &mut [u8], identifier: u16, seq_num: u16) -> icmpv6::Icmpv6Packet {
     let mut icmp_packet = icmpv6::MutableIcmpv6Packet::new(icmp_buffer).unwrap();
     icmp_packet.populate(&icmpv6::Icmpv6{
         icmpv6_type: icmpv6::Icmpv6Types::EchoRequest,
         icmpv6_code: icmpv6::Icmpv6Code::new(0),
         checksum: 0,
-        payload: vec![]
+        payload: make_payload(identifier, seq_num)
     });
 
     icmp_packet.set_checksum(icmpv6::checksum(
             &icmp_packet.to_immutable(), &net::Ipv6Addr::from_str("0.0.0.0.0.0").unwrap(), &dest));
     icmp_packet.consume_to_immutable()
+}
+
+fn make_payload(identifier: u16, seq_num: u16) -> Vec<u8> {
+    vec![
+        (identifier & ((1 << 8) - 1)) as u8,
+        (identifier >> 8) as u8,
+        (seq_num & ((1 << 8) - 1)) as u8,
+        (seq_num >> 8) as u8
+    ]
+}
+
+fn read_payload(payload: &[u8]) -> (u16, u16) {
+    (payload[0] as u16 + ((payload[1] as u16) << 8), // identifier
+     payload[2] as u16 + ((payload[3] as u16) << 8)) // sequence number
 }
 
