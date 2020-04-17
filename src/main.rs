@@ -1,4 +1,8 @@
+use std;
+use std::thread;
 use std::env;
+use std::sync;
+use std::sync::atomic;
 use std::net;
 use std::time;
 use std::net::ToSocketAddrs;
@@ -11,6 +15,7 @@ const DEFAULT_TTL: u8 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_PAYLOAD_SIZE: usize = 56;
 const DEFAULT_DELAY_MS: u64 = 1000;
+const DEFAULT_ITER: usize = usize::max_value();
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -18,6 +23,8 @@ fn main() {
     let mut ttl = DEFAULT_TTL;
     let mut addr = &"".to_string();
     let mut timeout_ms = DEFAULT_TIMEOUT_MS;
+    let mut delay_ms = DEFAULT_DELAY_MS;
+    let mut iterations = DEFAULT_ITER;
 
     let mut i = 1;
     let mut pos_args = 0;
@@ -27,11 +34,19 @@ fn main() {
         match args[i].as_str() {
             "--ttl" => {
                 i += 1;
-                ttl = args[i].parse::<u8>().expect(format!("{} is not a valid TTL number! 9S unhappy :(", args[i]).as_str());
+                ttl = args[i].parse::<u8>().expect(format!("{} is not a valid TTL value! 9S unhappy :(", args[i]).as_str());
             },
             "--timeout" => {
                 i += 1;
-                timeout_ms = args[i].parse::<u64>().expect(format!("{} is not a valid timeout value! 9S unhappy :(", args[i]).as_str());
+                timeout_ms = args[i].parse::<u64>().expect(format!("{} is not a valid timeout value in ms! 9S unhappy :(", args[i]).as_str());
+            },
+            "--delay" => {
+                i += 1;
+                delay_ms = args[i].parse::<u64>().expect(format!("{} is not a valid delay value in ms! 9S unhappy :(", args[i]).as_str());
+            },
+            "--iter" => {
+                i += 1;
+                iterations = args[i].parse::<usize>().expect(format!("{} is not a valid number of iterations! 9S unhappy :(", args[i]).as_str());
             },
             _ => {
                 if pos_args > pos_args_max {
@@ -50,10 +65,10 @@ fn main() {
         panic!("You are missing an argument! 9S unhappy :(");
     }
 
-    ping(addr, ttl, timeout_ms);
+    ping(addr, iterations, ttl, timeout_ms, delay_ms);
 }
 
-pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
+pub fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u64) {
     let timeout = time::Duration::from_millis(timeout_ms);
 
     let ip_addr = match net::IpAddr::from_str(addr) {
@@ -74,107 +89,158 @@ pub fn ping(addr: &String, ttl: u8, timeout_ms: u64) {
         }
     };
 
-    let mut total_packets = 0u32;
-    let mut lost_packets = 0u32;
-    let mut total_rtt = 0u128;
     let identifier = std::process::id() as u16;
-    let mut seq_num = 0u16;
 
     match ip_addr {
         net::IpAddr::V4(_) => {
             // note: must use Layer4 since pnet does not support IPv6 Layer3
-            let (mut sender, mut receiver) = transport_channel(1024, TransportChannelType::Layer4(
+            let (mut sender, receiver) = transport_channel(1024, TransportChannelType::Layer4(
                     TransportProtocol::Ipv4(ip::IpNextHeaderProtocols::Icmp)))
                 .expect("Unable to open transport channel! 9S unhappy!");
             sender.set_ttl(ttl).unwrap();
-            let mut receiver_iter = icmp_packet_iter(&mut receiver);
 
-            loop {
-                total_packets += 1;
-                seq_num += 1;
+            let sent_packets = sync::Arc::new(sync::Mutex::new(Vec::with_capacity(20)));
+            let not_done = sync::Arc::new(atomic::AtomicBool::new(true));
+
+            let receiver_thread = make_icmp_receiver_thread(not_done.clone(), receiver, sent_packets.clone(), identifier, addr.clone());
+            let timeout_thread = make_icmp_timeout_thread(not_done.clone(), sent_packets.clone(), timeout, addr.clone());
+
+            for _ in 0..iterations {
                 let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
-                let packet = make_icmp_packet(&mut icmp_buffer, identifier, seq_num);
                 let curr_time = time::Instant::now();
 
+                let packet = {
+                    let mut sent_packets_locked = sent_packets.lock().unwrap();
+                    let p = make_icmp_packet(&mut icmp_buffer, identifier, sent_packets_locked.len() as u16 + 1);
+                    sent_packets_locked.push(Some(time::Instant::now()));
+                    p
+                };
+
                 sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy!");
 
-                loop {
-                    let res = receiver_iter.next_with_timeout(timeout)
-                        .expect("Error in receiving next packet! 9S unhappy!");
-                    let res_tuple = match res {
-                        Some(p) => p,
-                        None => {
-                            lost_packets += 1;
-                            println!("9S did not received packet from {} in {} ms (timeout); sent {}, with {} ({:.1}%) lost/timeout so far.",
-                            addr, timeout_ms, total_packets, lost_packets, lost_packets as f32 / total_packets as f32 * 100.0f32);
-
-                            break;
-                        }
-                    };
-
-                    match res_tuple.0.get_icmp_type() {
-                        icmp::IcmpTypes::EchoReply => {
-                            let (res_identifier, res_seq_num) = read_payload(res_tuple.0.payload());
-
-                            if res_identifier == identifier && res_seq_num == seq_num {
-                                let elapsed_ms = curr_time.elapsed().as_millis();
-                                total_rtt += elapsed_ms;
-                                println!("9S received packet from {} in {} ms (avg rtt: {:.1} ms); sent {}, with {} ({:.1}%) lost/timeout so far.",
-                                addr, elapsed_ms, total_rtt as f64 / (total_packets - lost_packets) as f64, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
-
-                                break;
-                            }
-                        },
-                        icmp::IcmpTypes::DestinationUnreachable => {
-                            lost_packets += 1;
-                            println!("{} is unreachable by 9S (code {})! Sent {}, with {} ({:.1}%) lost/timeout so far.",
-                            addr, res_tuple.0.get_icmp_code().0, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
-
-                            break;
-                        },
-                        icmp::IcmpTypes::TimeExceeded => {
-                            lost_packets += 1;
-                            println!("9S found out that the packet (ttl: {}) expired before reaching {} (last host: {})! Sent {}, with {} ({:.1}%) lost/timeout so far.",
-                            ttl, addr, res_tuple.1, total_packets, lost_packets, lost_packets as f64 / total_packets as f64 * 100.0f64);
-
-                            break;
-                        },
-                        _ => () // keep waiting for the correct packet to come back
-                    }
+                // ensure that we send a packet exactly once every delay_ms milliseconds
+                match time::Duration::from_millis(delay_ms).checked_sub(curr_time.elapsed()) {
+                    Some(time) => thread::sleep(time),
+                    None => ()
                 }
-
-                std::thread::sleep(time::Duration::from_millis(DEFAULT_DELAY_MS));
             }
+
+            not_done.store(false, atomic::Ordering::SeqCst);
+
+            receiver_thread.join().unwrap();
+            timeout_thread.join().unwrap();
         },
         net::IpAddr::V6(ip) => {
-            // note: must use Layer4 since pnet does not support IPv6 Layer3
-            let (mut sender, mut receiver) = transport_channel(1024, TransportChannelType::Layer4(
-                    TransportProtocol::Ipv6(ip::IpNextHeaderProtocols::Icmpv6)))
-                .expect("Unable to open transport channel! 9S unhappy!");
-            sender.set_ttl(ttl).unwrap();
-            let mut receiver_iter = icmpv6_packet_iter(&mut receiver);
 
-            loop {
-                let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
-                let packet = make_icmpv6_packet(ip, &mut icmp_buffer, identifier, seq_num);
-                sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy!");
+        }
+    }
+}
 
-                loop {
-                    let res_packet = receiver_iter.next_with_timeout(timeout)
-                        .expect("Error in receiving next packet! 9S unhappy!").unwrap();
+fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
+                             mut receiver: TransportReceiver,
+                             sent_packets: sync::Arc<sync::Mutex<Vec<Option<time::Instant>>>>,
+                             identifier: u16, addr: String) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut receiver_iter = icmp_packet_iter(&mut receiver);
+        let mut total_rtt = 0;
+        let mut received_packets = 0;
+        let mut lost_packets = 0;
 
-                    // we only care about echo replies
-                    if res_packet.0.get_icmpv6_type() == icmpv6::Icmpv6Types::EchoReply {
-                        println!("{:?}", res_packet);
+        while not_done.load(atomic::Ordering::SeqCst) {
+            let next_res = receiver_iter.next_with_timeout(time::Duration::from_millis(1000))
+                .expect("Error receiving packet! 9S unhappy :(");
+
+            let (res_packet, res_ip) = match next_res {
+                Some(res) => res,
+                None => continue
+            };
+
+            match res_packet.get_icmp_type() {
+                icmp::IcmpTypes::EchoReply => {
+                    let (res_identifier, res_seq_num) = read_payload(res_packet.payload());
+                    let mut sent_packets_locked = sent_packets.lock().unwrap();
+
+                    if res_identifier == identifier && (res_seq_num as usize) <= sent_packets_locked.len() {
+                        // at this point we double checked that the received packet is definitely a packet
+                        // sent by this specific process (and not some other process doing a ping)
+
+                        match sent_packets_locked[res_seq_num as usize - 1] {
+                            Some(send_time) => {
+                                let elapsed_ms = send_time.elapsed().as_millis();
+                                total_rtt += elapsed_ms;
+                                received_packets += 1;
+                                println!("9S received packet (seq num: {}) from {} in {} ms (avg rtt: {:.1} ms)!\n\tSent {}, with {} ({:.1}%) lost so far.",
+                                res_seq_num, addr, elapsed_ms, total_rtt as f64 / received_packets as f64, sent_packets_locked.len(), lost_packets, lost_packets as f64 / sent_packets_locked.len() as f64 * 100f64);
+                                sent_packets_locked[res_seq_num as usize - 1] = None;
+                            },
+                            None => {
+                                println!("9S received a duplicate packet from {}!", addr);
+                            }
+                        }
 
                         break;
                     }
-                }
+                    // quietly skip this received packet if it is not sent by this process
+                },
+                icmp::IcmpTypes::DestinationUnreachable => {
+                    let sent_packets_locked = sent_packets.lock().unwrap();
+                    lost_packets += 1;
+                    println!("9S received a destination unreachable packet from {} (code: {})!\n\tSent {}, with {} ({:.1}%) lost so far.",
+                    addr, res_packet.get_icmp_code().0, sent_packets_locked.len(), lost_packets, lost_packets as f64 / sent_packets_locked.len() as f64 * 100f64);
 
-                std::thread::sleep(time::Duration::from_millis(DEFAULT_DELAY_MS));
+                    break;
+                },
+                icmp::IcmpTypes::TimeExceeded => {
+                    let sent_packets_locked = sent_packets.lock().unwrap();
+                    lost_packets += 1;
+                    println!("9S received a time exceeded packet before reaching {} (last host: {}, code: {})!\n\tSent {}, with {} ({:.1}%) lost so far.",
+                    addr, res_ip, res_packet.get_icmp_code().0, sent_packets_locked.len(), lost_packets, lost_packets as f64 / sent_packets_locked.len() as f64 * 100f64);
+
+                    break;
+                },
+                _ => () // quietly skip this received packet if it is not what we were expecting
             }
         }
-    }
+    })
+}
+
+fn make_icmp_timeout_thread(not_done: sync::Arc<atomic::AtomicBool>,
+                            sent_packets: sync::Arc<sync::Mutex<Vec<Option<time::Instant>>>>,
+                            timeout: time::Duration, addr: String) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut idx = 0;
+        let mut total_timeout = 0;
+
+        while not_done.load(atomic::Ordering::SeqCst) {
+            // needs to acquire lock, so we do not check too often
+            thread::sleep(timeout);
+
+            let mut sent_packets_locked = sent_packets.lock().unwrap();
+
+            while idx < sent_packets_locked.len() {
+                match sent_packets_locked[idx] {
+                    Some(sent_time) => {
+                        let elapsed = sent_time.elapsed();
+
+                        if elapsed > timeout {
+                            total_timeout += 1;
+                            println!("9S realized that a packet on its way to {} (seq num: {}) has timed out in {} > {} ms!\n\tSent {}, with {} ({:.1}%) timed out so far.",
+                            addr, idx + 1, elapsed.as_millis(), timeout.as_millis(), sent_packets_locked.len(), total_timeout, total_timeout as f64 / sent_packets_locked.len() as f64 * 100f64);
+                            sent_packets_locked[idx] = None;
+                        }else{
+                            // assumption: sent times are nondecreasing
+                            // therefore, we can stop if we detect a packet
+                            // that has not timed out yet
+                            break;
+                        }
+                    },
+                    None => () // continue looping
+                }
+
+                idx += 1;
+            }
+        }
+    })
 }
 
 fn make_icmp_packet(icmp_buffer: &mut [u8], identifier: u16, seq_num: u16) -> icmp::IcmpPacket {
