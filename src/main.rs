@@ -34,6 +34,7 @@ fn main() {
     let mut pos_args = 0;
     let pos_args_max = 1;
 
+    // very basic argument parser; a library should be used if more arguments are needed
     while i < args.len() {
         match args[i].as_str() {
             "--ttl" => {
@@ -94,26 +95,35 @@ pub fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms
         }
     };
 
+    // use process id to identify ICMP packets that were sent from this process
     let identifier = std::process::id() as u16;
 
     match ip_addr {
         net::IpAddr::V4(_) => {
             // note: must use Layer4 since pnet does not support IPv6 Layer3
-            // it will take care of wrapping our ICMP packets with IPv4/IPv6 packets before sending
+            // it will take care of creating sockets and wrapping our ICMP packets with IPv4/IPv6 packets before sending
+            // the biggest problem of this is that we cannot obtain the ttl of received packets
             let (mut sender, receiver) = transport_channel(1024, TransportChannelType::Layer4(
                     TransportProtocol::Ipv4(ip::IpNextHeaderProtocols::Icmp)))
                 .expect("Unable to open transport channel! 9S unhappy!");
+            // this will set the ttl for all packets
             sender.set_ttl(ttl).unwrap();
 
+            // keep track of whether we are exiting
             let not_done = sync::Arc::new(atomic::AtomicBool::new(true));
+            // keep track of the total number of packets sent
+            // note: use reference counting to share these variables across threads
             let total_packets = sync::Arc::new(atomic::AtomicUsize::new(0));
 
+            // handle exit signal, which will stops the threads
             make_exit_handler(not_done.clone());
 
+            // create a separate thread to receive packets in any order
             let receiver_thread = make_icmp_receiver_thread(not_done.clone(), receiver, total_packets.clone(), identifier, timeout, addr.clone());
 
             while not_done.load(atomic::Ordering::SeqCst) &&
                 total_packets.load(atomic::Ordering::SeqCst) < iterations {
+                // very basic loop to send packets with a delay
                 total_packets.fetch_add(1, atomic::Ordering::SeqCst);
 
                 let mut icmp_buffer = [0u8; 8 + DEFAULT_PAYLOAD_SIZE];
@@ -124,15 +134,20 @@ pub fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms
                 thread::sleep(delay);
             }
 
+            // check if we are exiting because we finished enough iterations
+            // it is possible to reach this point without finishing enough iterations due to Ctrl+C
             if not_done.load(atomic::Ordering::SeqCst) {
-                not_done.store(false, atomic::Ordering::SeqCst);
-
+                // if we have finished enough iterations then we need to wait for packets until timeout
+                // otherwise, we don't wait because we received an exit signal
                 match timeout.checked_sub(delay) {
                     Some(time) => thread::sleep(time),
                     None => ()
                 }
+
+                not_done.store(false, atomic::Ordering::SeqCst);
             }
 
+            // print final statistics
             let (received, lost) = receiver_thread.join().unwrap();
             let total = total_packets.load(atomic::Ordering::SeqCst);
             let timedout = if lost + received > total {0} else {total - received - lost};
@@ -156,10 +171,13 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
         let mut total_rtt = 0;
         let mut received_packets = 0;
         let mut lost_packets = 0;
+        // use received to keep track of duplicate packets
         let mut received = collections::HashSet::new();
+        let receiver_delay = time::Duration::from_millis(100);
 
         while not_done.load(atomic::Ordering::SeqCst) {
-            let next_res = receiver_iter.next_with_timeout(time::Duration::from_millis(300))
+            // receiver_delay should be low to keep this thread responsive
+            let next_res = receiver_iter.next_with_timeout(receiver_delay)
                 .expect("Error receiving packet! 9S unhappy :(");
 
             let (res_packet, res_ip) = match next_res {
@@ -167,6 +185,7 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
                 None => continue
             };
 
+            let curr_time = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_millis();
             let total_packets_sent = total_packets.load(atomic::Ordering::SeqCst);
 
             match res_packet.get_icmp_type() {
@@ -180,7 +199,7 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
                         if received.contains(&res_seq_num) {
                             println!("9S received a duplicate packet from {}!", addr);
                         }else{
-                            let elapsed_ms = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_millis() - res_send_time;
+                            let elapsed_ms = curr_time - res_send_time;
                             total_rtt += elapsed_ms;
 
                             if elapsed_ms > timeout.as_millis() {
