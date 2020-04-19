@@ -7,4 +7,5 @@ edition = "2018"
 [dependencies]
 pnet = "0.25.0"
 ctrlc = {version = "3.1.4", features = ["termination"]}
+dns-lookup = "1.0.1"
 

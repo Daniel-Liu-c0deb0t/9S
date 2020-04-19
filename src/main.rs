@@ -7,13 +7,14 @@ use std::sync;
 use std::sync::atomic;
 use std::net;
 use std::time;
-use std::net::ToSocketAddrs;
 use std::str::*;
 
 use pnet::packet::*;
 use pnet::transport::*;
 
 use ctrlc;
+
+use dns_lookup;
 
 const DEFAULT_TTL: u8 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
@@ -22,17 +23,19 @@ const DEFAULT_DELAY_MS: u64 = 1000;
 // we only have 16 bits to store the sequence number for each packet
 // future work: expand number of bits or recycle used sequence numbers
 const DEFAULT_ITER: usize = u16::max_value() as usize;
-const HELP_MSG: &str = "To build and run: ./9S [optional args] address
+const HELP_MSG: &str = "To build and run: ./9S [optional args] ADDRESS
 
 Required args:
-\t address : IPv4/IPv6 address or hostname (autodetected), where the ICMP packets will be sent.
+\t ADDRESS : IPv4/IPv6 address or hostname (autodetected), where the ICMP packets will be sent.
 
 Optional args:
-\t--ttl ttl : Sets the time to live (hop limit) for all packets. Limitation: only works for IPv4. Default: 64.
-\t--timeout timeout_ms : Sets the time limit (in milliseconds) before a packet is categorized as timed out. Default: 5000 ms.
-\t--delay delay_ms : Sets the delay (in milliseconds) between sending each packet. Default: 1000 ms.
-\t--iter iter : Sets the number of packets to be sent. Default: keep sending and don't stop.
-\t-h or --help : Prints this message.
+\t-4 : Use IPv4. Default: autodetect.
+\t-6 : Use IPv6. Default: autodetect.
+\t--ttl TTL : Sets the time to live (hop limit) for all packets. Limitation: only works for IPv4. Default: 64.
+\t--timeout TIMEOUT_MS : Sets the time limit (in milliseconds) before a packet is categorized as timed out. Default: 5000 ms.
+\t--delay DELAY_MS : Sets the delay (in milliseconds) between sending each packet. Default: 1000 ms.
+\t--iter ITER : Sets the number of packets to be sent. Default: keep sending and don't stop.
+\t-h or --help : Prints this message and exit.
 
 Each ICMP packet is strictly checked for matching identifiers, etc., so multiple programs can be sending pings at the same time.";
 
@@ -44,6 +47,8 @@ fn main() {
     let mut timeout_ms = DEFAULT_TIMEOUT_MS;
     let mut delay_ms = DEFAULT_DELAY_MS;
     let mut iterations = DEFAULT_ITER;
+    let mut use_ipv4 = false;
+    let mut use_ipv6 = false;
 
     let mut i = 1;
     let mut pos_args = 0;
@@ -55,19 +60,29 @@ fn main() {
         match args[i].as_str() {
             "--ttl" => {
                 i += 1;
-                ttl = args[i].parse::<u8>().expect(format!("{} is not a valid TTL value! 9S unhappy :( ", args[i]).as_str());
+                ttl = args[i].parse::<u8>()
+                    .expect(format!("{} is not a valid TTL value! 9S unhappy :( ", args[i]).as_str());
             },
             "--timeout" => {
                 i += 1;
-                timeout_ms = args[i].parse::<u64>().expect(format!("{} is not a valid timeout value in ms! 9S unhappy :( ", args[i]).as_str());
+                timeout_ms = args[i].parse::<u64>()
+                    .expect(format!("{} is not a valid timeout value in ms! 9S unhappy :( ", args[i]).as_str());
             },
             "--delay" => {
                 i += 1;
-                delay_ms = args[i].parse::<u64>().expect(format!("{} is not a valid delay value in ms! 9S unhappy :( ", args[i]).as_str());
+                delay_ms = args[i].parse::<u64>()
+                    .expect(format!("{} is not a valid delay value in ms! 9S unhappy :( ", args[i]).as_str());
             },
             "--iter" => {
                 i += 1;
-                iterations = args[i].parse::<usize>().expect(format!("{} is not a valid number of iterations! 9S unhappy :( ", args[i]).as_str());
+                iterations = args[i].parse::<usize>()
+                    .expect(format!("{} is not a valid number of iterations! 9S unhappy :( ", args[i]).as_str());
+            },
+            "-4" => {
+                use_ipv4 = true;
+            },
+            "-6" => {
+                use_ipv6 = true;
             },
             "-h" | "--help" => {
                 println!("{}", HELP_MSG);
@@ -75,7 +90,9 @@ fn main() {
             },
             _ => {
                 if pos_args > pos_args_max {
-                    panic!("Too many arguments! 9S unhappy :( ");
+                    eprintln!("Too many argument! 9S unhappy :(");
+                    println!("{}", HELP_MSG);
+                    std::process::exit(0);
                 }else{
                     addr = &args[i];
                     pos_args += 1;
@@ -92,36 +109,61 @@ fn main() {
         std::process::exit(0);
     }
 
-    ping(addr, iterations, ttl, timeout_ms, delay_ms);
+    if use_ipv4 && use_ipv6 {
+        panic!("No, you can't use both IPv4 and IPv6 at the same time! 9S unhappy :(");
+    }
+
+    ping(addr, use_ipv4, use_ipv6, iterations, ttl, timeout_ms, delay_ms);
 }
 
 /// Pings a certain IPv4/IPv6 address or hostname, and prints output to stdout.
 ///
 /// # Arguments
 /// * `addr` - An IPv4/IPv6 address or hostname string.
+/// * `use_ipv4` - Indicates that IPv4 must be used. This cannot be true if `use_ipv6` is true.
+/// * `use_ipv6` - Indicates that IPv6 must be used. This cannot be true if `use_ipv4` is true.
 /// * `iterations` - Number of packets to send.
-/// * `ttl` - Time to live.
+/// * `ttl` - Time to live for all packets that are sent.
 /// * `timeout_ms` - How long to wait for an echo reply when an echo request is sent.
 /// * `delay_ms` - Delay between sending each packet.
-fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u64) {
+fn ping(addr: &String, use_ipv4: bool, use_ipv6: bool, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u64) {
     let timeout = time::Duration::from_millis(timeout_ms);
     let delay = time::Duration::from_millis(delay_ms);
 
-    let ip_addr = match net::IpAddr::from_str(addr) {
+    let (ip_addr, addr_name) = match net::IpAddr::from_str(addr) {
         Ok(ip) => {
-            println!("Pinging {} with 9S's special abilities.", ip);
-            ip
+            // if we only have an IP address, then we lookup the hostname and print it, if possible
+            let addr_name = match dns_lookup::lookup_addr(&ip) {
+                Ok(name) => name,
+                Err(_) => addr.to_string()
+            };
+
+            println!("Pinging {} ({}) with 9S's special abilities.", addr_name, ip);
+            (ip, addr_name)
         },
         Err(_) => {
             // at this point, ip_addr must be a hostname or an invalid IPv4/IPv6 address
-            // workaround to do DNS lookup using SocketAddr; port number does not matter
-            let ip = (addr.as_str(), 80u16).to_socket_addrs()
-                .expect(format!("{} is not a valid IPv4/IPv6 address or hostname! 9S unhappy :( ", addr).as_str())
-                .next()
-                .unwrap()
-                .ip();
+            let ips = dns_lookup::lookup_host(addr.as_str())
+                .expect(format!("Could not perform DNS lookup on {}! 9S unhappy :( ", addr).as_str());
+
+            let ip = if use_ipv4 {
+                ips.into_iter().find(|&ip| ip.is_ipv4())
+                    .expect(format!("No IPv4 address found for {}! 9S unhappy :( ", addr).as_str())
+            }else if use_ipv6 {
+                ips.into_iter().find(|&ip| ip.is_ipv6())
+                    .expect(format!("No IPv6 address found for {}! 9S unhappy :( ", addr).as_str())
+            }else{
+                // just get any address, if possible
+                *ips.get(0).expect(format!("No IP address found for {}! 9S unhappy :( ", addr).as_str())
+            };
+
             println!("Pinging {} ({}) with 9S's special abilities.", addr, ip);
-            ip
+
+            // lookup the hostname again because it may differ from addr, if possible
+            match dns_lookup::lookup_addr(&ip) {
+                Ok(name) => (ip, name),
+                Err(_) => (ip, addr.to_string())
+            }
         }
     };
 
@@ -163,8 +205,8 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
     // create a separate thread to receive packets in any order
     // the main thread will handle sending
     let receiver_thread = match ip_addr {
-        net::IpAddr::V4(_) => make_icmp_receiver_thread(not_done.clone(), receiver, total_packets.clone(), identifier, timeout, addr.clone()),
-        net::IpAddr::V6(_) => make_icmpv6_receiver_thread(not_done.clone(), receiver, total_packets.clone(), identifier, timeout, addr.clone())
+        net::IpAddr::V4(_) => make_icmp_receiver_thread(not_done.clone(), receiver, total_packets.clone(), iterations, identifier, timeout, addr_name.clone()),
+        net::IpAddr::V6(_) => make_icmpv6_receiver_thread(not_done.clone(), receiver, total_packets.clone(), iterations, identifier, timeout, addr_name.clone())
     };
 
     let mut curr_time = time::Instant::now();
@@ -208,9 +250,10 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
     // check if we are exiting because we finished enough iterations
     // it is possible to reach this point without finishing enough iterations due to Ctrl+C
     if not_done.load(atomic::Ordering::SeqCst) {
-        // if we have finished enough iterations then we need to wait for packets until timeout
+        // if we have finished enough iterations then we may need to wait for packets until timeout
         // otherwise, we don't wait because we received an exit signal
-        thread::sleep(timeout);
+        let curr_time = time::Instant::now();
+        while not_done.load(atomic::Ordering::SeqCst) && curr_time.elapsed() <= timeout {}
 
         not_done.store(false, atomic::Ordering::SeqCst);
     }
@@ -220,7 +263,7 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
     let total = *total_packets.lock().unwrap();
     let timedout = if lost + received > total {0} else {total - received - lost};
     println!("\nDone! 9S sent {} packets total to {}.\n\t9S received {} ({:.1}%), lost {} ({:.1}%), and realized that {} ({:.1}%) timed out.",
-    total, addr, received, received as f64 / total as f64 * 100f64, lost, lost as f64 / total as f64 * 100f64, timedout, timedout as f64 / total as f64 * 100f64);
+    total, addr_name, received, received as f64 / total as f64 * 100f64, lost, lost as f64 / total as f64 * 100f64, timedout, timedout as f64 / total as f64 * 100f64);
 }
 
 /// Creates a separate to concurrently receive ICMP packets that are sent, and returns a JoinHandle that
@@ -230,12 +273,14 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
 /// * `not_done` - Whether this process is exiting.
 /// * `receiver` - TransportReceiver for receiving packets.
 /// * `total_packets` - Number of packets sent so far.
+/// * `iterations` - Maximum number of packets to send.
 /// * `identifier` - A number uniquely identifying this process.
 /// * `timeout` - How long to wait for an echo reply when an echo request is sent.
 /// * `addr` - Address of where to send packets. This is mainly used for printing to stdout.
 fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
                              mut receiver: TransportReceiver,
                              total_packets: sync::Arc<sync::Mutex<usize>>,
+                             iterations: usize,
                              identifier: u16,
                              timeout: time::Duration,
                              addr: String) -> thread::JoinHandle<(usize, usize)> {
@@ -244,6 +289,7 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
         let mut total_rtt = 0;
         let mut received_packets = 0;
         let mut lost_packets = 0;
+        let mut timed_out_packets = 0;
         // HashSet to keep track of duplicate packets
         let mut received = collections::HashSet::new();
         let receiver_delay = time::Duration::from_millis(100);
@@ -278,6 +324,7 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
 
                             // a packet is timed out even if we receive it after the timeout
                             if elapsed_ms > timeout.as_millis() {
+                                timed_out_packets += 1;
                                 println!("9S received timed out packet (seq num: {}) from {} in {} ms!\n\tSent {}, with {} ({:.1}%) lost so far.",
                                 res_seq_num, addr, elapsed_ms, total_packets_sent, lost_packets, lost_packets as f64 / total_packets_sent as f64 * 100f64);
                             }else{
@@ -332,6 +379,12 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
                 },
                 _ => () // quietly skip this received packet if it is not what we were expecting
             }
+
+            // future work: also count timed out packets that were never received
+            if received_packets + lost_packets + timed_out_packets >= iterations {
+                not_done.store(false, atomic::Ordering::SeqCst);
+                break;
+            }
         }
 
         (received_packets, lost_packets)
@@ -345,12 +398,14 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
 /// * `not_done` - Whether this process is exiting.
 /// * `receiver` - TransportReceiver for receiving packets.
 /// * `total_packets` - Number of packets sent so far.
+/// * `iterations` - Maximum number of packets to send.
 /// * `identifier` - A number uniquely identifying this process.
 /// * `timeout` - How long to wait for an echo reply when an echo request is sent.
 /// * `addr` - Address of where to send packets. This is mainly used for printing to stdout.
 fn make_icmpv6_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
                              mut receiver: TransportReceiver,
                              total_packets: sync::Arc<sync::Mutex<usize>>,
+                             iterations: usize,
                              identifier: u16,
                              timeout: time::Duration,
                              addr: String) -> thread::JoinHandle<(usize, usize)> {
@@ -359,6 +414,7 @@ fn make_icmpv6_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
         let mut total_rtt = 0;
         let mut received_packets = 0;
         let mut lost_packets = 0;
+        let mut timed_out_packets = 0;
         // HashSet to keep track of duplicate packets
         let mut received = collections::HashSet::new();
         let receiver_delay = time::Duration::from_millis(100);
@@ -394,6 +450,7 @@ fn make_icmpv6_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
 
                             // a packet is timed out even if we receive it after the timeout
                             if elapsed_ms > timeout.as_millis() {
+                                timed_out_packets += 1;
                                 println!("9S received timed out packet (seq num: {}) from {} in {} ms (avg rtt: {:.1} ms)!\n\tSent {}, with {} ({:.1}%) lost so far.",
                                 res_seq_num, addr, elapsed_ms, total_rtt as f64 / received_packets as f64, total_packets_sent, lost_packets, lost_packets as f64 / total_packets_sent as f64 * 100f64);
                             }else{
@@ -446,6 +503,12 @@ fn make_icmpv6_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
                     // not our packet, not our problem
                 },
                 _ => () // quietly skip this received packet if it is not what we were expecting
+            }
+
+            // future work: also count timed out packets that were never received
+            if received_packets + lost_packets + timed_out_packets >= iterations {
+                not_done.store(false, atomic::Ordering::SeqCst);
+                break;
             }
         }
 
@@ -502,6 +565,8 @@ fn make_icmpv6_packet(dest: net::Ipv6Addr, icmp_buffer: &mut [u8], identifier: u
         payload: make_payload(identifier, seq_num)
     });
 
+    // this checksum calculation requires the source IPv6 address, which we don't immediately have
+    // therefore, we just set it as all zeros; however this may lead to problems with checksum validation
     icmp_packet.set_checksum(icmpv6::checksum(
             &icmp_packet.to_immutable(), &net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), &dest));
     icmp_packet.consume_to_immutable()
