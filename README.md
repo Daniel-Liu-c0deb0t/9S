@@ -5,10 +5,10 @@ This was created as a submission for Cloudflare's systems internship take-home a
 
 9S uses multiple threads to repeatedly send and receive pings concurrently. Press `Ctrl+C` (`SIGINT` or `SIGTERM`) to stop the program and print some statistics.
 
-# Name
+## Name
 The name for this program is inspired by an android from the game NieR: Automata.
 
-# Usage
+## Usage
 First, clone this repository:
 ```
 git clone https://github.com/Daniel-Liu-c0deb0t/9S.git
@@ -26,7 +26,7 @@ To run tests, run
 ```
 The tests are just example pings with different command-line arguments.
 
-# Arguments
+## Arguments
 Here is the help message given if you run `./9S --help`:
 ```
 To build and run: ./9S [optional args] ADDRESS
@@ -46,8 +46,8 @@ Optional args:
 Each ICMP packet is strictly checked for matching identifiers, etc., so multiple programs can be sending pings at the same time.
 ```
 
-# My Thoughts
+## My Thoughts
 I started this project with nearly zero knowledge in network programming. I am quite proud of how this turned out in just one week. Unfortunately, due to Rust lacking a solid networking library, and other external crates having many limitations/bugs, finishing this project was harder than expected. However, I still enjoyed programming in Rust.
 
-# Note
+## Note
 If ICMPv6 packets are being sent, but you are not getting any replies, then there could potentially be a problem in how the checksums are calculated for ICMPv6 packets. In this implementation, the source address is assumed to be all zeros.
