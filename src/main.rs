@@ -28,7 +28,7 @@ Required args:
 \t address : IPv4/IPv6 address or hostname (autodetected), where the ICMP packets will be sent.
 
 Optional args:
-\t--ttl ttl : Sets the time to live (or hop limit) for all packets. Default: 64.
+\t--ttl ttl : Sets the time to live (hop limit) for all packets. Limitation: only works for IPv4. Default: 64.
 \t--timeout timeout_ms : Sets the time limit (in milliseconds) before a packet is categorized as timed out. Default: 5000 ms.
 \t--delay delay_ms : Sets the delay (in milliseconds) between sending each packet. Default: 1000 ms.
 \t--iter iter : Sets the number of packets to be sent. Default: keep sending and don't stop.
@@ -55,19 +55,19 @@ fn main() {
         match args[i].as_str() {
             "--ttl" => {
                 i += 1;
-                ttl = args[i].parse::<u8>().expect(format!("{} is not a valid TTL value! 9S unhappy :(", args[i]).as_str());
+                ttl = args[i].parse::<u8>().expect(format!("{} is not a valid TTL value! 9S unhappy :( ", args[i]).as_str());
             },
             "--timeout" => {
                 i += 1;
-                timeout_ms = args[i].parse::<u64>().expect(format!("{} is not a valid timeout value in ms! 9S unhappy :(", args[i]).as_str());
+                timeout_ms = args[i].parse::<u64>().expect(format!("{} is not a valid timeout value in ms! 9S unhappy :( ", args[i]).as_str());
             },
             "--delay" => {
                 i += 1;
-                delay_ms = args[i].parse::<u64>().expect(format!("{} is not a valid delay value in ms! 9S unhappy :(", args[i]).as_str());
+                delay_ms = args[i].parse::<u64>().expect(format!("{} is not a valid delay value in ms! 9S unhappy :( ", args[i]).as_str());
             },
             "--iter" => {
                 i += 1;
-                iterations = args[i].parse::<usize>().expect(format!("{} is not a valid number of iterations! 9S unhappy :(", args[i]).as_str());
+                iterations = args[i].parse::<usize>().expect(format!("{} is not a valid number of iterations! 9S unhappy :( ", args[i]).as_str());
             },
             "-h" | "--help" => {
                 println!("{}", HELP_MSG);
@@ -75,7 +75,7 @@ fn main() {
             },
             _ => {
                 if pos_args > pos_args_max {
-                    panic!("Too many arguments! 9S unhappy :(");
+                    panic!("Too many arguments! 9S unhappy :( ");
                 }else{
                     addr = &args[i];
                     pos_args += 1;
@@ -87,7 +87,9 @@ fn main() {
     }
 
     if pos_args != pos_args_max {
-        panic!("You are missing an argument! 9S unhappy :(");
+        eprintln!("You are missing an argument! 9S unhappy :(");
+        println!("{}", HELP_MSG);
+        std::process::exit(0);
     }
 
     ping(addr, iterations, ttl, timeout_ms, delay_ms);
@@ -114,7 +116,7 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
             // at this point, ip_addr must be a hostname or an invalid IPv4/IPv6 address
             // workaround to do DNS lookup using SocketAddr; port number does not matter
             let ip = (addr.as_str(), 80u16).to_socket_addrs()
-                .expect(format!("{} is not a valid IPv4/IPv6 address or hostname! 9S unhappy :(", addr).as_str())
+                .expect(format!("{} is not a valid IPv4/IPv6 address or hostname! 9S unhappy :( ", addr).as_str())
                 .next()
                 .unwrap()
                 .ip();
@@ -134,18 +136,20 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
             // the biggest limitation of this is that we cannot obtain the ttl of received packets
             transport_channel(1024, TransportChannelType::Layer4(
                     TransportProtocol::Ipv4(ip::IpNextHeaderProtocols::Icmp)))
-                .expect("Unable to open transport channel! 9S unhappy :(");
-            
+                .expect("Unable to open transport channel! 9S unhappy :( ")
         },
         net::IpAddr::V6(_) => {
             transport_channel(1024, TransportChannelType::Layer4(
-                    TransportProtocol::Ipv6(ip::IpNextHeaderProtocols::Icmp)))
-                .expect("Unable to open transport channel! 9S unhappy :(");
+                    TransportProtocol::Ipv6(ip::IpNextHeaderProtocols::Icmpv6)))
+                .expect("Unable to open transport channel! 9S unhappy :( ")
         }
-    }
+    };
 
     // this will set the ttl for all packets
-    sender.set_ttl(ttl).unwrap();
+    // unfortunately, pnet does not support setting the ttl on IPv6
+    if ip_addr.is_ipv4() {
+        sender.set_ttl(ttl).unwrap();
+    }
 
     // keep track of whether this process are exiting
     // note: use reference counting to share this variable across threads
@@ -161,7 +165,7 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
     let receiver_thread = match ip_addr {
         net::IpAddr::V4(_) => make_icmp_receiver_thread(not_done.clone(), receiver, total_packets.clone(), identifier, timeout, addr.clone()),
         net::IpAddr::V6(_) => make_icmpv6_receiver_thread(not_done.clone(), receiver, total_packets.clone(), identifier, timeout, addr.clone())
-    }
+    };
 
     let mut curr_time = time::Instant::now();
     // just for the first iteration
@@ -183,11 +187,11 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
                 match ip_addr {
                     net::IpAddr::V4(_) => {
                         let packet = make_icmp_packet(&mut icmp_buffer, identifier, (*total_packets_sent) as u16);
-                        sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy :(");
+                        sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy :( ");
                     },
                     net::IpAddr::V6(ip) => {
-                        let packet = make_icmpv6_packet(&ip, &mut icmp_buffer, identifier, (*total_packets_sent) as u16);
-                        sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy :(");
+                        let packet = make_icmpv6_packet(ip, &mut icmp_buffer, identifier, (*total_packets_sent) as u16);
+                        sender.send_to(packet, ip_addr).expect("Error in sending packet! 9S unhappy :( ");
                     }
                 }
 
@@ -250,7 +254,7 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
         while not_done.load(atomic::Ordering::SeqCst) {
             // receiver_delay should be low to keep this thread responsive to not_done changes
             let next_res = receiver_iter.next_with_timeout(receiver_delay)
-                .expect("Error receiving packet! 9S unhappy :(");
+                .expect("Error receiving packet! 9S unhappy :( ");
 
             let (res_packet, res_ip) = match next_res {
                 Some(res) => res,
@@ -274,13 +278,13 @@ fn make_icmp_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
                             println!("9S received a duplicate packet (seq num: {}) from {}!", res_seq_num, addr);
                         }else{
                             let elapsed_ms = curr_time - res_send_time;
-                            total_rtt += elapsed_ms;
 
                             // a packet is timed out even if we receive it after the timeout
                             if elapsed_ms > timeout.as_millis() {
-                                println!("9S received timed out packet (seq num: {}) from {} in {} ms (avg rtt: {:.1} ms)!\n\tSent {}, with {} ({:.1}%) lost so far.",
-                                res_seq_num, addr, elapsed_ms, total_rtt as f64 / received_packets as f64, total_packets_sent, lost_packets, lost_packets as f64 / total_packets_sent as f64 * 100f64);
+                                println!("9S received timed out packet (seq num: {}) from {} in {} ms!\n\tSent {}, with {} ({:.1}%) lost so far.",
+                                res_seq_num, addr, elapsed_ms, total_packets_sent, lost_packets, lost_packets as f64 / total_packets_sent as f64 * 100f64);
                             }else{
+                                total_rtt += elapsed_ms;
                                 received_packets += 1;
                                 println!("9S received packet (seq num: {}) from {} in {} ms (avg rtt: {:.1} ms)!\n\tSent {}, with {} ({:.1}%) lost so far.",
                                     res_seq_num, addr, elapsed_ms, total_rtt as f64 / received_packets as f64, total_packets_sent, lost_packets, lost_packets as f64 / total_packets_sent as f64 * 100f64);
@@ -365,7 +369,7 @@ fn make_icmpv6_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
         while not_done.load(atomic::Ordering::SeqCst) {
             // receiver_delay should be low to keep this thread responsive to not_done changes
             let next_res = receiver_iter.next_with_timeout(receiver_delay)
-                .expect("Error receiving packet! 9S unhappy :(");
+                .expect("Error receiving packet! 9S unhappy :( ");
 
             let (res_packet, res_ip) = match next_res {
                 Some(res) => res,
@@ -377,7 +381,7 @@ fn make_icmpv6_receiver_thread(not_done: sync::Arc<atomic::AtomicBool>,
             // printed results), so just read it once
             let total_packets_sent = {*total_packets.lock().unwrap()};
 
-            match res_packet.get_icmp_type() {
+            match res_packet.get_icmpv6_type() {
                 icmpv6::Icmpv6Types::EchoReply => {
                     let (res_identifier, res_seq_num, res_send_time) = read_payload(res_packet.payload());
 
@@ -492,7 +496,7 @@ fn make_icmp_packet(icmp_buffer: &mut [u8], identifier: u16, seq_num: u16) -> ic
 /// * `icmp_buffer` - Empty buffer with enough size for the packet.
 /// * `identifier` - Unique identifier for this process.
 /// * `seq_num` - Sequence number for this packet.
-fn make_icmpv6_packet(dest: &net::Ipv6Addr, icmp_buffer: &mut [u8], identifier: u16, seq_num: u16) -> icmpv6::Icmpv6Packet {
+fn make_icmpv6_packet(dest: net::Ipv6Addr, icmp_buffer: &mut [u8], identifier: u16, seq_num: u16) -> icmpv6::Icmpv6Packet {
     let mut icmp_packet = icmpv6::MutableIcmpv6Packet::new(icmp_buffer).unwrap();
     icmp_packet.populate(&icmpv6::Icmpv6{
         icmpv6_type: icmpv6::Icmpv6Types::EchoRequest,
@@ -502,7 +506,7 @@ fn make_icmpv6_packet(dest: &net::Ipv6Addr, icmp_buffer: &mut [u8], identifier: 
     });
 
     icmp_packet.set_checksum(icmpv6::checksum(
-            &icmp_packet.to_immutable(), &net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), dest));
+            &icmp_packet.to_immutable(), &net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), &dest));
     icmp_packet.consume_to_immutable()
 }
 

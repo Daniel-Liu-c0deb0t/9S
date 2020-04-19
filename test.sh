@@ -1,36 +1,38 @@
-echo "Due to the nature of this task, creating unit/integration tests are very difficult."
-echo "Instead, this test script presents a few real-world test cases."
-echo "Test start!"
+printf "Due to the nature of this task, creating unit/integration tests are very difficult.\n"
+printf "Instead, this test script presents a few real-world test cases.\n"
+printf "Tests start!\n"
 
-set -x
-
-echo "\n\nSimple ping."
-timeout 10 ./9S cloudflare.com
-
-echo "\n\nPing, but use a short ttl. Expect Time Exceeded packets."
-timeout 10 ./9S --ttl 1 cloudflare.com
-
-echo "\n\nPing localhost."
-timeout 10 ./9S localhost
-
-echo "\n\nPing using raw IPv4 address."
-timeout 10 ./9S 127.0.0.1
-
-echo "\n\nPing using raw IPv6 address."
-timeout 10 ./9S blog.cloudflare.com
-
-echo "\n\nPing, but use a short timeout. Expect no output until the end."
-timeout 10 ./9S --timeout 10 nierautomata.square-enix-games.com
-
-echo "\n\nSend only 3 packets."
-timeout 10 ./9S --iter 3 cloudflare.com
-
-echo "\n\nTwo processes each doing their own ping. Expect only one packet to be received every second!"
-timeout 10 ./9S cloudflare.com &
-echo "\n"
-timeout 10 ./9S cloudflare.com
+printf "\n\nSimple ping.\n"
+timeout 5 ./9S cloudflare.com
 wait
 
-echo "\n\nTest done!"
+printf "\n\nPing, but use a short ttl. Expect Time Exceeded packets.\n"
+timeout 5 ./9S --ttl 1 cloudflare.com
+wait
 
-set +x
+printf "\n\nPing localhost.\n"
+timeout 5 ./9S localhost
+wait
+
+printf "\n\nPing using raw IPv4 address.\n"
+timeout 5 ./9S 127.0.0.1
+wait
+
+printf "\n\nPing using raw IPv6 address.\n"
+timeout 5 ./9S ::1
+wait
+
+printf "\n\nPing, but use an extremely short timeout. Expect packets to timeout.\n"
+timeout 5 ./9S --timeout 10 nierautomata.square-enix-games.com
+wait
+
+printf "\n\nSend only 3 packets.\n"
+timeout 5 ./9S --iter 3 cloudflare.com
+wait
+
+printf "\n\nTwo processes each doing their own ping. Expect only 5 packets per process!\n"
+timeout 5 ./9S cloudflare.com &
+timeout 5 ./9S cloudflare.com
+wait
+
+printf "\n\nTests done!\n"
