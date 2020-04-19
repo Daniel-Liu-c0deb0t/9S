@@ -1,4 +1,4 @@
-printf "Due to the nature of this task, creating unit/integration tests are very difficult.\n"
+sudo printf "Due to the nature of this task, creating unit/integration tests are very difficult.\n"
 printf "Instead, this test script presents a few real-world test cases.\n"
 printf "Tests start!\n"
 
