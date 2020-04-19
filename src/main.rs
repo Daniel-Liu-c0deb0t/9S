@@ -210,10 +210,7 @@ fn ping(addr: &String, iterations: usize, ttl: u8, timeout_ms: u64, delay_ms: u6
     if not_done.load(atomic::Ordering::SeqCst) {
         // if we have finished enough iterations then we need to wait for packets until timeout
         // otherwise, we don't wait because we received an exit signal
-        match timeout.checked_sub(delay) {
-            Some(time) => thread::sleep(time),
-            None => ()
-        }
+        thread::sleep(timeout);
 
         not_done.store(false, atomic::Ordering::SeqCst);
     }
