@@ -52,4 +52,4 @@ Each ICMP packet is strictly checked for matching identifiers, etc., so multiple
 I started this project with nearly zero knowledge in network programming. I am quite proud of how this turned out in just one week. Unfortunately, due to Rust lacking a solid networking library, and other external crates having many limitations/bugs, finishing this project was harder than expected. However, I still enjoyed programming in Rust.
 
 ## Note
-If ICMPv6 packets are being sent, but you are not getting any replies, then there could potentially be a problem in how the checksums are calculated for ICMPv6 packets. In this implementation, the source address is assumed to be all zeros.
+I have not been able to test sending IPv6 packets on my home network. If ICMPv6 packets are being sent, but you are not getting any replies, then there could potentially be a problem in how the checksums are calculated for ICMPv6 packets. In this implementation, the source address is assumed to be all zeros.
