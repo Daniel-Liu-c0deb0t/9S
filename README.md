@@ -20,7 +20,10 @@ After that, you can build and run 9S by simply running
 ```
 ./9S cloudflare.com
 ```
-This will use `cargo` to pull and compile all dependencies. 9S only depends on `pnet`, `ctrlc`, and `dns_lookup`, but these crates have a ton of other dependencies, so compilation may take a while. Note that sending and receiving ICMP packets requires `sudo` permissions.
+This will use `cargo` to pull and compile all dependencies. 9S only depends on `pnet`, `ctrlc`, and `dns_lookup`, but these crates have a ton of other dependencies, so compilation may take a while. Note that sending and receiving ICMP packets requires `sudo` permissions, so you will be prompted to enter your sudo password.
+
+Sample output:
+![9S_output](9S_output.png)
 
 To run tests, run
 ```
