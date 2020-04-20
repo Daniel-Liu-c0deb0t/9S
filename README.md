@@ -9,7 +9,9 @@ This was created as a submission for Cloudflare's systems internship take-home a
 The name for this program is inspired by an android from the game NieR: Automata.
 
 ## Usage
-First, clone this repository:
+First, confirm that you have Rust and Cargo installed, and you are running everything on a Linux machine.
+
+Then, clone this repository:
 ```
 git clone https://github.com/Daniel-Liu-c0deb0t/9S.git
 cd 9S
