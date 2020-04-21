@@ -1,5 +1,5 @@
 # 9S
-Basic Rust program to send and receive pings.
+Basic Rust program that uses multiple threads to send and receive pings.
 
 This was created as a submission for Cloudflare's systems internship take-home assignment ([link](https://github.com/cloudflare-internship-2020/internship-application-systems)). The task was to create a `ping` program. This implementation satifies both the required and the extra-credit tasks. Many additional features were also implemented.
 
